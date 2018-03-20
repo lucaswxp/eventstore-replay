@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/streadway/amqp"
@@ -19,8 +20,10 @@ func main() {
 	var routingKey string
 	var prefix string
 	var aggregateType string
+	var fqn string
 	var after string
 	var aggregateID string
+	var pause int
 
 	app := cli.NewApp()
 
@@ -44,6 +47,18 @@ func main() {
 			Destination: &aggregateID,
 		},
 		cli.StringFlag{
+			Name:        "fqn",
+			Value:       "",
+			Usage:       "Send single fqn stream of events",
+			Destination: &fqn,
+		},
+		cli.IntFlag{
+			Name:        "pause",
+			Value:       3000,
+			Usage:       "It will wait specified number of miliseconds between events for each aggregate root event stream",
+			Destination: &pause,
+		},
+		cli.StringFlag{
 			Name:        "aggregateType",
 			Value:       "",
 			Usage:       "Send only aggregate events of certain type",
@@ -59,7 +74,7 @@ func main() {
 
 	app.Action = func(c *cli.Context) error {
 
-		runApp(routingKey, prefix, aggregateID, aggregateType, after)
+		runApp(routingKey, prefix, aggregateID, aggregateType, after, fqn, pause)
 
 		return nil
 	}
@@ -70,7 +85,7 @@ func main() {
 	}
 }
 
-func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string) {
+func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, fqn string, pause int) {
 
 	var mysqlHost string
 	var mysqlUser string
@@ -138,6 +153,11 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		preparedValues = append(preparedValues, aggregateType)
 	}
 
+	if fqn != "" {
+		conds = append(conds, "fqn = ?")
+		preparedValues = append(preparedValues, fqn)
+	}
+
 	if after != "" {
 		conds = append(conds, "createdAt >= ?")
 		preparedValues = append(preparedValues, after)
@@ -188,8 +208,10 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 	// Fetch rows
 	var counter = 0
+	aggregateIndex := make(map[string](chan *EventMessage))
+	var runningGoroutines = 0
+
 	for rows.Next() {
-		counter++
 		// get RawBytes from data
 		err = rows.Scan(scanArgs...)
 		if err != nil {
@@ -200,21 +222,68 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 		json.Unmarshal(values[5], &evdata)
 
-		ev := EventMessage{EventName: string(values[4]), EventData: evdata}
-		b, _ := json.Marshal(ev)
+		evEnvelope := EventData{EventName: string(values[4]), EventData: evdata}
+		aggregateId := string(values[1])
 
-		data := amqp.Publishing{Body: b}
+		ev := EventMessage{AggregateType: string(values[2]), Fqn: string(values[4]), AggregateId: aggregateId, Data: &evEnvelope}
 
-		channel.Publish(prefix+string(values[2])+"-"+typeQueue, routingKey, false, false, data)
+		_, exists := aggregateIndex[aggregateId]
 
-		fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(values[1]), string(values[4]))
+		if !exists {
+			aggregateIndex[aggregateId] = make(chan *EventMessage, 1)
+
+			go (func(ch chan *EventMessage, aggregateId string) {
+			loop:
+				for {
+					select {
+					case elem := <-ch:
+						counter++
+
+						b, _ := json.Marshal(elem.Data)
+
+						data := amqp.Publishing{Body: b}
+
+						channel.Publish(prefix+elem.AggregateType+"-"+typeQueue, routingKey, false, false, data)
+
+						fmt.Println("["+strconv.Itoa(counter)+"]", "sending", elem.AggregateId, elem.Fqn)
+
+						if pause > 0 {
+							time.Sleep(time.Millisecond * time.Duration(pause))
+						}
+					case <-time.After(15 * time.Second):
+						close(ch)
+						delete(aggregateIndex, aggregateId)
+						runningGoroutines--
+						break loop
+					}
+				}
+			})(aggregateIndex[aggregateId], aggregateId)
+			runningGoroutines++
+		}
+
+		aggregateIndex[aggregateId] <- &ev
 	}
+
 	if err = rows.Err(); err != nil {
 		panic(err.Error()) // proper error handling instead of panic in your app
+	}
+
+	for {
+		if runningGoroutines == 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
 type EventMessage struct {
+	Data          *EventData `json:"data"`
+	AggregateType string     `json:"aggregateType"`
+	Fqn           string     `json:"fqn"`
+	AggregateId   string     `json:"aggregateId"`
+}
+
+type EventData struct {
 	EventName string      `json:"eventName"`
 	EventData interface{} `json:"eventData"`
 }
