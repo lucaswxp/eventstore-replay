@@ -212,7 +212,6 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	aggregateIndex := make(map[string]*Aggregate)
 
 	var runningGoroutines = 0
-	mut := sync.Mutex{}
 
 	for rows.Next() {
 		// get RawBytes from data
@@ -233,7 +232,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		_, exists := aggregateIndex[aggregateId]
 
 		if !exists {
-			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage)}
+			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage, 1)}
 
 			go (func(agg *Aggregate, aggregateId string) {
 			loop:
@@ -258,7 +257,6 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 						agg.Mutex.Unlock()
 					case <-time.After(15 * time.Second):
 						close(agg.Channel)
-						delete(aggregateIndex, aggregateId)
 						runningGoroutines--
 						break loop
 					}
@@ -268,9 +266,9 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		}
 
 		go (func(ev *EventMessage) {
-			mut.Lock()
+			//mut.Lock()
 			aggregateIndex[aggregateId].Channel <- ev
-			mut.Unlock()
+			//mut.Unlock()
 		})(&ev)
 	}
 
