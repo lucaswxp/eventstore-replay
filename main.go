@@ -212,6 +212,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	aggregateIndex := make(map[string]*Aggregate)
 
 	var runningGoroutines = 0
+	mut := sync.Mutex{}
 
 	for rows.Next() {
 		// get RawBytes from data
@@ -226,7 +227,6 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 		evEnvelope := EventData{EventName: string(values[4]), EventData: evdata}
 		aggregateId := string(values[1])
-		mut := sync.Mutex{}
 
 		ev := EventMessage{AggregateType: string(values[2]), Fqn: string(values[4]), AggregateId: aggregateId, Data: &evEnvelope}
 
