@@ -230,7 +230,9 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 		ev := EventMessage{AggregateType: string(values[2]), Fqn: string(values[4]), AggregateId: aggregateId, Data: &evEnvelope}
 
+		mut.Lock()
 		_, exists := aggregateIndex[aggregateId]
+		mut.Unlock()
 
 		if !exists {
 			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage, 99999999)}
