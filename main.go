@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -208,7 +209,8 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 	// Fetch rows
 	var counter = 0
-	aggregateIndex := make(map[string](chan *EventMessage))
+	aggregateIndex := make(map[string]*Aggregate)
+
 	var runningGoroutines = 0
 
 	for rows.Next() {
@@ -230,13 +232,13 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		_, exists := aggregateIndex[aggregateId]
 
 		if !exists {
-			aggregateIndex[aggregateId] = make(chan *EventMessage, 1)
+			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.RWMutex{}, Channel: make(chan *EventMessage, 1)}
 
-			go (func(ch chan *EventMessage, aggregateId string) {
+			go (func(agg *Aggregate, aggregateId string) {
 			loop:
 				for {
 					select {
-					case elem := <-ch:
+					case elem := <-agg.Channel:
 
 						b, _ := json.Marshal(elem.Data)
 
@@ -251,7 +253,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 							time.Sleep(time.Millisecond * time.Duration(pause))
 						}
 					case <-time.After(15 * time.Second):
-						close(ch)
+						close(agg.Channel)
 						delete(aggregateIndex, aggregateId)
 						runningGoroutines--
 						break loop
@@ -262,7 +264,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		}
 
 		go (func(ev *EventMessage) {
-			aggregateIndex[aggregateId] <- ev
+			aggregateIndex[aggregateId].Channel <- ev
 		})(&ev)
 	}
 
@@ -288,4 +290,9 @@ type EventMessage struct {
 type EventData struct {
 	EventName string      `json:"eventName"`
 	EventData interface{} `json:"eventData"`
+}
+
+type Aggregate struct {
+	Channel chan *EventMessage
+	Mutex   sync.RWMutex
 }
