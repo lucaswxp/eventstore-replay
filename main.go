@@ -237,7 +237,6 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 				for {
 					select {
 					case elem := <-ch:
-						counter++
 
 						b, _ := json.Marshal(elem.Data)
 
@@ -245,6 +244,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 						channel.Publish(prefix+elem.AggregateType+"-"+typeQueue, routingKey, false, false, data)
 
+						counter++
 						fmt.Println("["+strconv.Itoa(counter)+"]", "sending", elem.AggregateId, elem.Fqn)
 
 						if pause > 0 {
@@ -261,7 +261,9 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 			runningGoroutines++
 		}
 
-		aggregateIndex[aggregateId] <- &ev
+		go (func(ev *EventMessage) {
+			aggregateIndex[aggregateId] <- ev
+		})(&ev)
 	}
 
 	if err = rows.Err(); err != nil {
