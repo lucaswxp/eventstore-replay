@@ -226,13 +226,14 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 		evEnvelope := EventData{EventName: string(values[4]), EventData: evdata}
 		aggregateId := string(values[1])
+		mut := sync.Mutex{}
 
 		ev := EventMessage{AggregateType: string(values[2]), Fqn: string(values[4]), AggregateId: aggregateId, Data: &evEnvelope}
 
 		_, exists := aggregateIndex[aggregateId]
 
 		if !exists {
-			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.RWMutex{}, Channel: make(chan *EventMessage, 1)}
+			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage)}
 
 			go (func(agg *Aggregate, aggregateId string) {
 			loop:
@@ -240,6 +241,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 					select {
 					case elem := <-agg.Channel:
 
+						agg.Mutex.Lock()
 						b, _ := json.Marshal(elem.Data)
 
 						data := amqp.Publishing{Body: b}
@@ -252,6 +254,8 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 						if pause > 0 {
 							time.Sleep(time.Millisecond * time.Duration(pause))
 						}
+
+						agg.Mutex.Unlock()
 					case <-time.After(15 * time.Second):
 						close(agg.Channel)
 						delete(aggregateIndex, aggregateId)
@@ -264,7 +268,9 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		}
 
 		go (func(ev *EventMessage) {
+			mut.Lock()
 			aggregateIndex[aggregateId].Channel <- ev
+			mut.Unlock()
 		})(&ev)
 	}
 
@@ -294,5 +300,5 @@ type EventData struct {
 
 type Aggregate struct {
 	Channel chan *EventMessage
-	Mutex   sync.RWMutex
+	Mutex   sync.Mutex
 }
