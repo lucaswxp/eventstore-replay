@@ -210,6 +210,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	// Fetch rows
 	var counter = 0
 	aggregateIndex := make(map[string]*Aggregate)
+	mut := sync.Mutex{}
 
 	var runningGoroutines = 0
 
@@ -232,7 +233,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		_, exists := aggregateIndex[aggregateId]
 
 		if !exists {
-			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage, 1)}
+			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage, 99999999)}
 
 			go (func(agg *Aggregate, aggregateId string) {
 			loop:
@@ -266,9 +267,9 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		}
 
 		go (func(ev *EventMessage) {
-			//mut.Lock()
+			mut.Lock()
 			aggregateIndex[aggregateId].Channel <- ev
-			//mut.Unlock()
+			mut.Unlock()
 		})(&ev)
 	}
 
