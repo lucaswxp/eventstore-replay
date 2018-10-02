@@ -8,8 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/streadway/amqp"
@@ -22,10 +20,8 @@ func main() {
 	var prefix string
 	var modifier string
 	var aggregateType string
-	var fqn string
 	var after string
 	var aggregateID string
-	var pause int
 
 	app := cli.NewApp()
 
@@ -47,18 +43,6 @@ func main() {
 			Value:       "",
 			Usage:       "Send single aggregate ID events",
 			Destination: &aggregateID,
-		},
-		cli.StringFlag{
-			Name:        "fqn",
-			Value:       "",
-			Usage:       "Send single fqn stream of events",
-			Destination: &fqn,
-		},
-		cli.IntFlag{
-			Name:        "pause",
-			Value:       3000,
-			Usage:       "It will wait specified number of miliseconds between events for each aggregate root event stream",
-			Destination: &pause,
 		},
 		cli.StringFlag{
 			Name:        "aggregateType",
@@ -161,11 +145,6 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		preparedValues = append(preparedValues, aggregateType)
 	}
 
-	if fqn != "" {
-		conds = append(conds, "fqn = ?")
-		preparedValues = append(preparedValues, fqn)
-	}
-
 	if after != "" {
 		conds = append(conds, "createdAt >= ?")
 		preparedValues = append(preparedValues, after)
@@ -216,12 +195,8 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 	// Fetch rows
 	var counter = 0
-	aggregateIndex := make(map[string]*Aggregate)
-	mut := sync.Mutex{}
-
-	var runningGoroutines = 0
-
 	for rows.Next() {
+		counter++
 		// get RawBytes from data
 		err = rows.Scan(scanArgs...)
 		if err != nil {
@@ -232,26 +207,8 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 		json.Unmarshal(values[5], &evdata)
 
-		evEnvelope := EventData{EventName: string(values[4]), EventData: evdata}
-		aggregateId := string(values[1])
-
-		ev := EventMessage{AggregateType: string(values[2]), Fqn: string(values[4]), AggregateId: aggregateId, Data: &evEnvelope}
-
-		mut.Lock()
-		_, exists := aggregateIndex[aggregateId]
-		mut.Unlock()
-
-		if !exists {
-			aggregateIndex[aggregateId] = &Aggregate{Mutex: sync.Mutex{}, Channel: make(chan *EventMessage, 99999999)}
-
-			go (func(agg *Aggregate, aggregateId string) {
-			loop:
-				for {
-					select {
-					case elem := <-agg.Channel:
-
-						agg.Mutex.Lock()
-						b, _ := json.Marshal(elem.Data)
+		ev := EventMessage{EventName: string(values[4]), EventData: evdata}
+		b, _ := json.Marshal(ev)
 
 		data := amqp.Publishing{Body: b}
 		id := string(values[1])
@@ -270,32 +227,12 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 
 		fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(values[1]), string(values[4]), "\n	modifier", bucket)
 	}
-
 	if err = rows.Err(); err != nil {
 		panic(err.Error()) // proper error handling instead of panic in your app
-	}
-
-	for {
-		if runningGoroutines == 0 {
-			break
-		}
-		time.Sleep(1 * time.Second)
 	}
 }
 
 type EventMessage struct {
-	Data          *EventData `json:"data"`
-	AggregateType string     `json:"aggregateType"`
-	Fqn           string     `json:"fqn"`
-	AggregateId   string     `json:"aggregateId"`
-}
-
-type EventData struct {
 	EventName string      `json:"eventName"`
 	EventData interface{} `json:"eventData"`
-}
-
-type Aggregate struct {
-	Channel chan *EventMessage
-	Mutex   sync.Mutex
 }
