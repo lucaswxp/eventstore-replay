@@ -20,6 +20,7 @@ func main() {
 
 	var routingKey string
 	var prefix string
+	var modifier string
 	var aggregateType string
 	var fqn string
 	var after string
@@ -37,7 +38,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:        "prefix",
-			Value:       "",
+			Value:       "staging-stable",
 			Usage:       "Prefix all events. Use 'staging' for sending to test env",
 			Destination: &prefix,
 		},
@@ -71,11 +72,17 @@ func main() {
 			Usage:       "Send only events after certain date, format: '2018-01-01 00:00:00'",
 			Destination: &after,
 		},
+		cli.StringFlag{
+			Name: "modifier",
+			Value: "",
+			Usage: "Set splice id",
+			Destination: &modifier,
+		},
 	}
 
 	app.Action = func(c *cli.Context) error {
 
-		runApp(routingKey, prefix, aggregateID, aggregateType, after, fqn, pause)
+		runApp(routingKey, prefix, aggregateID, aggregateType, after, modifier)
 
 		return nil
 	}
@@ -86,7 +93,7 @@ func main() {
 	}
 }
 
-func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, fqn string, pause int) {
+func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string) {
 
 	var mysqlHost string
 	var mysqlUser string
@@ -246,33 +253,22 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 						agg.Mutex.Lock()
 						b, _ := json.Marshal(elem.Data)
 
-						data := amqp.Publishing{Body: b}
+		data := amqp.Publishing{Body: b}
+		id := string(values[1])
+		modifierInt, _ := strconv.Atoi(modifier)
 
-						channel.Publish(prefix+elem.AggregateType+"-"+typeQueue, routingKey, false, false, data)
-
-						counter++
-						fmt.Println("["+strconv.Itoa(counter)+"]", "sending", elem.AggregateId, elem.Fqn)
-
-						if pause > 0 {
-							time.Sleep(time.Millisecond * time.Duration(pause))
-						}
-
-						agg.Mutex.Unlock()
-					case <-time.After(15 * time.Second):
-						close(agg.Channel)
-						runningGoroutines--
-						break loop
-					}
-				}
-			})(aggregateIndex[aggregateId], aggregateId)
-			runningGoroutines++
+		if len(id) < modifierInt {
+			modifierInt = 0
 		}
 
-		go (func(ev *EventMessage) {
-			mut.Lock()
-			aggregateIndex[aggregateId].Channel <- ev
-			mut.Unlock()
-		})(&ev)
+		bucket := id[0: modifierInt]
+		if modifierInt == 1 {
+			bucket = "0"+bucket
+		}
+
+		channel.Publish(prefix+"-"+string(values[2])+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+
+		fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(values[1]), string(values[4]), "\n	modifier", bucket)
 	}
 
 	if err = rows.Err(); err != nil {
