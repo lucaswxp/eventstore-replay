@@ -18,6 +18,7 @@ func main() {
 
 	var routingKey string
 	var prefix string
+	var modifier string
 	var aggregateType string
 	var after string
 	var aggregateID string
@@ -33,7 +34,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:        "prefix",
-			Value:       "",
+			Value:       "staging-stable",
 			Usage:       "Prefix all events. Use 'staging' for sending to test env",
 			Destination: &prefix,
 		},
@@ -55,11 +56,17 @@ func main() {
 			Usage:       "Send only events after certain date, format: '2018-01-01 00:00:00'",
 			Destination: &after,
 		},
+		cli.StringFlag{
+			Name: "modifier",
+			Value: "",
+			Usage: "Set splice id",
+			Destination: &modifier,
+		},
 	}
 
 	app.Action = func(c *cli.Context) error {
 
-		runApp(routingKey, prefix, aggregateID, aggregateType, after)
+		runApp(routingKey, prefix, aggregateID, aggregateType, after, modifier)
 
 		return nil
 	}
@@ -70,7 +77,7 @@ func main() {
 	}
 }
 
-func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string) {
+func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string) {
 
 	var mysqlHost string
 	var mysqlUser string
@@ -204,10 +211,21 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		b, _ := json.Marshal(ev)
 
 		data := amqp.Publishing{Body: b}
+		id := string(values[1])
+		modifierInt, _ := strconv.Atoi(modifier)
 
-		channel.Publish(prefix+string(values[2])+"-"+typeQueue, routingKey, false, false, data)
+		if len(id) < modifierInt {
+			modifierInt = 0
+		}
 
-		fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(values[1]), string(values[4]))
+		bucket := id[0: modifierInt]
+		if modifierInt == 1 {
+			bucket = "0"+bucket
+		}
+
+		channel.Publish(prefix+"-"+string(values[2])+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+
+		fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(values[1]), string(values[4]), "\n	modifier", bucket)
 	}
 	if err = rows.Err(); err != nil {
 		panic(err.Error()) // proper error handling instead of panic in your app
