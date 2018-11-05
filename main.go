@@ -1,17 +1,24 @@
 package main
 
 import (
-	"database/sql"
+	//"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/mongodb/mongo-go-driver/mongo"
 	"log"
 	"os"
 	"strconv"
-	"strings"
+	"sync"
 
+	//"strings"
+
+	"./mongo-database"
+	"context"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/mongodb/mongo-go-driver/bson"
 	"github.com/streadway/amqp"
 	"github.com/urfave/cli"
+	"time"
 )
 
 func main() {
@@ -65,9 +72,7 @@ func main() {
 	}
 
 	app.Action = func(c *cli.Context) error {
-
 		runApp(routingKey, prefix, aggregateID, aggregateType, after, modifier)
-
 		return nil
 	}
 
@@ -79,26 +84,14 @@ func main() {
 
 func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string) {
 
-	var mysqlHost string
-	var mysqlUser string
-	var mysqlPassword string
-	var mysqlDatabase string
+	var mongoDatabase string
 
 	var rabbitHost string
 	var rabbitUser string
 	var rabbitPassword string
 
-	if mysqlHost = os.Getenv("EVENTSTORE_MYSQL_HOST"); mysqlHost == "" {
-		mysqlHost = "localhost"
-	}
-	if mysqlUser = os.Getenv("EVENTSTORE_MYSQL_USER"); mysqlUser == "" {
-		mysqlUser = "root"
-	}
-	if mysqlPassword = os.Getenv("EVENTSTORE_MYSQL_PASSWORD"); mysqlPassword == "" {
-		mysqlPassword = ""
-	}
-	if mysqlDatabase = os.Getenv("EVENTSTORE_MYSQL_DATABASE"); mysqlDatabase == "" {
-		mysqlDatabase = "eventstore"
+	if mongoDatabase = os.Getenv("EVENTSTORE_MONGO_DATABASE"); mongoDatabase == "" {
+		mongoDatabase = "eventstore"
 	}
 
 	if rabbitHost = os.Getenv("EVENTSTORE_RABBIT_HOST"); rabbitHost == "" {
@@ -111,128 +104,108 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		rabbitPassword = "guest"
 	}
 
-	// Open mysql connection
-	db, err := sql.Open("mysql", mysqlUser+":"+mysqlPassword+"@tcp("+mysqlHost+":3306)/"+mysqlDatabase)
-	if err != nil {
-		panic(err.Error()) // Just for example purpose. You should use proper error handling instead of panic
-	}
-	defer db.Close()
-
-	// Open rabbitmq connection
 	connection, err := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
-
 	defer connection.Close()
-
 	channel, err := connection.Channel()
 
 	if err != nil {
-		panic(err.Error()) // Just for example purpose. You should use proper error handling instead of panic
+		panic(err.Error()) 
 	}
 
-	// Execute the query
-	query := "SELECT * FROM events"
-
-	var conds []string
-	var preparedValues []interface{}
-
+	var query = bson.NewDocument()
 	if aggregateID != "" {
-		conds = append(conds, "aggregateId = ?")
-		preparedValues = append(preparedValues, aggregateID)
+		query = query.Append(bson.EC.String("events.0.aggregateId", aggregateID))
 	}
 
 	if aggregateType != "" {
-		conds = append(conds, "aggregateType = ?")
-		preparedValues = append(preparedValues, aggregateType)
+		query = query.Append(bson.EC.String("events.0.aggregateType", aggregateType))
 	}
 
 	if after != "" {
-		conds = append(conds, "createdAt >= ?")
-		preparedValues = append(preparedValues, after)
+		
 	}
 
-	if len(conds) > 0 {
-		query = (query + " WHERE " + strings.Join(conds, " AND "))
+
+	c := myDatabase.ConnectMongo()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		var in64 = int64(i)
+		go exec(routingKey, prefix, aggregateID, aggregateType, after, modifier, mongoDatabase, "events_"+strconv.FormatInt(in64, 16), query, c, channel)
 	}
+	wg.Wait()
+}
 
-	query = (query + " ORDER BY id ASC")
-
-	fmt.Println(query)
-
-	stmtIns, err := db.Prepare(query) // ? = placeholder
-	if err != nil {
-		panic(err.Error()) // proper error handling instead of panic in your app
+func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo (*mongo.Client), rabbit (*amqp.Channel)){
+	cursor, _  := mongo.Database(database).Collection(collection).Find(context.Background(), query)
+	var items []Events
+	for cursor.Next(context.Background()) {
+		item := Events{}
+		cursor.Decode(&item)
+		items = append(items, item)
 	}
+	var counter = 0;
+	for _, obj := range items {
+		var events = obj.Events
+		for _, event := range events {
+			counter++;
 
-	defer stmtIns.Close() // Close the statement when we leave main() / the program terminates
+			d := event.Data.(*bson.Document)
 
-	rows, err := stmtIns.Query(preparedValues...)
+			var evv interface{}
 
-	if err != nil {
-		panic(err.Error()) // proper error handling instead of panic in your app
-	}
+			str := d.ToExtJSON((false))
 
-	// Get column names
-	columns, err := rows.Columns()
-	if err != nil {
-		panic(err.Error()) // proper error handling instead of panic in your app
-	}
+			json.Unmarshal([]byte(str), &evv)
 
-	// Make a slice for the values
-	values := make([]sql.RawBytes, len(columns))
+			ev := EventMessage{EventName: string(event.Name), EventData: evv}
 
-	scanArgs := make([]interface{}, len(values))
+			b, _ := json.Marshal(ev)
 
-	for i := range values {
-		scanArgs[i] = &values[i]
-	}
+			data := amqp.Publishing{Body: b}
+			id := string(event.AggregateId)
+			modifierInt, _ := strconv.Atoi(modifier)
 
-	var typeQueue string
-	if routingKey == "" {
-		typeQueue = "fanout"
-	} else {
-		typeQueue = "direct"
-	}
+			if len(id) < modifierInt {
+				modifierInt = 0
+			}
 
-	// Fetch rows
-	var counter = 0
-	for rows.Next() {
-		counter++
-		// get RawBytes from data
-		err = rows.Scan(scanArgs...)
-		if err != nil {
-			panic(err.Error()) // proper error handling instead of panic in your app
+			bucket := id[0: modifierInt]
+			/*if modifierInt == 1 {
+				bucket = "0"+bucket
+			}*/
+
+			var typeQueue string
+			if routingKey == "" {
+				typeQueue = "fanout"
+			} else {
+				typeQueue = "direct"
+			}
+
+			rabbit.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+
+			fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(event.AggregateId), "\n	modifier", bucket)
+			fmt.Println(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue)
 		}
-
-		var evdata interface{}
-
-		json.Unmarshal(values[5], &evdata)
-
-		ev := EventMessage{EventName: string(values[4]), EventData: evdata}
-		b, _ := json.Marshal(ev)
-
-		data := amqp.Publishing{Body: b}
-		id := string(values[1])
-		modifierInt, _ := strconv.Atoi(modifier)
-
-		if len(id) < modifierInt {
-			modifierInt = 0
-		}
-
-		bucket := id[0: modifierInt]
-		if modifierInt == 1 {
-			bucket = "0"+bucket
-		}
-
-		channel.Publish(prefix+"-"+string(values[2])+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
-
-		fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(values[1]), string(values[4]), "\n	modifier", bucket)
-	}
-	if err = rows.Err(); err != nil {
-		panic(err.Error()) // proper error handling instead of panic in your app
 	}
 }
 
 type EventMessage struct {
 	EventName string      `json:"eventName"`
 	EventData interface{} `json:"eventData"`
+}
+
+type Events struct {
+	Id    string `json:"id" bson:"id"`
+	Events []Event `json:"events" bson:"events"`
+}
+
+type Event struct {
+	AggregateId string `json:"aggregateId" bson:"aggregateId"`
+	AggregateType string `json:"aggregateType" bson:"aggregateType"`
+	Name string `json:"name" bson:"name"`
+	Fqn string `json:"fqn" bson:"fqn"`
+	Data interface{} `json:"data" bson:"data"`
+	EventId string `json:"eventId" bson:"eventId"`
+	CreatedAt  time.Time  `bson:"createdAt"`
 }
