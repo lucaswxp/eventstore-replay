@@ -11,7 +11,7 @@ import (
 
 	"github.com/mongodb/mongo-go-driver/mongo"
 
-	//"strings"
+	"strings"
 
 	"context"
 	"time"
@@ -156,6 +156,8 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 			var evv interface{}
 
 			str := d.ToExtJSON((false))
+			str = strings.Replace(str, "\n", "\\n", -1)
+			str = strings.Replace(str, "\t", "\\t", -1)
 
 			json.Unmarshal([]byte(str), &evv)
 
