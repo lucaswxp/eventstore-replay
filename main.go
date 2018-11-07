@@ -4,21 +4,23 @@ import (
 	//"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/mongodb/mongo-go-driver/mongo"
 	"log"
 	"os"
 	"strconv"
 	"sync"
 
+	"github.com/mongodb/mongo-go-driver/mongo"
+
 	//"strings"
 
-	"./mongo-database"
 	"context"
+	"time"
+
+	"./mongo-database"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/mongodb/mongo-go-driver/bson"
 	"github.com/streadway/amqp"
 	"github.com/urfave/cli"
-	"time"
 )
 
 func main() {
@@ -64,9 +66,9 @@ func main() {
 			Destination: &after,
 		},
 		cli.StringFlag{
-			Name: "modifier",
-			Value: "",
-			Usage: "Set splice id",
+			Name:        "modifier",
+			Value:       "1",
+			Usage:       "Set splice id",
 			Destination: &modifier,
 		},
 	}
@@ -109,12 +111,12 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	channel, err := connection.Channel()
 
 	if err != nil {
-		panic(err.Error()) 
+		panic(err.Error())
 	}
 
 	var query = bson.NewDocument()
 	if aggregateID != "" {
-		query = query.Append(bson.EC.String("events.0.aggregateId", aggregateID))
+		query = query.Append(bson.EC.String("id", aggregateID))
 	}
 
 	if aggregateType != "" {
@@ -122,9 +124,8 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	}
 
 	if after != "" {
-		
-	}
 
+	}
 
 	c := myDatabase.ConnectMongo()
 	var wg sync.WaitGroup
@@ -136,19 +137,19 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	wg.Wait()
 }
 
-func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo (*mongo.Client), rabbit (*amqp.Channel)){
-	cursor, _  := mongo.Database(database).Collection(collection).Find(context.Background(), query)
+func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo *mongo.Client, rabbit *amqp.Channel) {
+	cursor, _ := mongo.Database(database).Collection(collection).Find(context.Background(), query)
 	var items []Events
 	for cursor.Next(context.Background()) {
 		item := Events{}
 		cursor.Decode(&item)
 		items = append(items, item)
 	}
-	var counter = 0;
+	var counter = 0
 	for _, obj := range items {
 		var events = obj.Events
 		for _, event := range events {
-			counter++;
+			counter++
 
 			d := event.Data.(*bson.Document)
 
@@ -158,7 +159,7 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 
 			json.Unmarshal([]byte(str), &evv)
 
-			ev := EventMessage{EventName: string(event.Name), EventData: evv}
+			ev := EventMessage{EventName: string(event.Fqn), EventData: evv}
 
 			b, _ := json.Marshal(ev)
 
@@ -166,14 +167,7 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 			id := string(event.AggregateId)
 			modifierInt, _ := strconv.Atoi(modifier)
 
-			if len(id) < modifierInt {
-				modifierInt = 0
-			}
-
-			bucket := id[0: modifierInt]
-			/*if modifierInt == 1 {
-				bucket = "0"+bucket
-			}*/
+			bucket := id[0:modifierInt]
 
 			var typeQueue string
 			if routingKey == "" {
@@ -184,8 +178,7 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 
 			rabbit.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
 
-			fmt.Println("["+strconv.Itoa(counter)+"]", "sending", string(event.AggregateId), "\n	modifier", bucket)
-			fmt.Println(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue)
+			fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
 		}
 	}
 }
@@ -196,16 +189,16 @@ type EventMessage struct {
 }
 
 type Events struct {
-	Id    string `json:"id" bson:"id"`
+	Id     string  `json:"id" bson:"id"`
 	Events []Event `json:"events" bson:"events"`
 }
 
 type Event struct {
-	AggregateId string `json:"aggregateId" bson:"aggregateId"`
-	AggregateType string `json:"aggregateType" bson:"aggregateType"`
-	Name string `json:"name" bson:"name"`
-	Fqn string `json:"fqn" bson:"fqn"`
-	Data interface{} `json:"data" bson:"data"`
-	EventId string `json:"eventId" bson:"eventId"`
-	CreatedAt  time.Time  `bson:"createdAt"`
+	AggregateId   string      `json:"aggregateId" bson:"aggregateId"`
+	AggregateType string      `json:"aggregateType" bson:"aggregateType"`
+	Name          string      `json:"name" bson:"name"`
+	Fqn           string      `json:"fqn" bson:"fqn"`
+	Data          interface{} `json:"data" bson:"data"`
+	EventId       string      `json:"eventId" bson:"eventId"`
+	CreatedAt     time.Time   `bson:"createdAt"`
 }
