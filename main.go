@@ -180,7 +180,6 @@ func normalizeValue(el *bson.Value) *bson.Value {
 		var timestamp = time.Unix(el.DateTime() /1000, 0)
 
 		return bson.EC.String("", timestamp.Format(time.RFC3339)).Value()
-		break
 	}
 
 	return nil
