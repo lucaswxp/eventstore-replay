@@ -84,13 +84,18 @@ func main() {
 	}
 }
 
+var rabbitHost string
+var rabbitUser string
+var rabbitPassword string
+var connection *amqp.Connection
+var channel *amqp.Channel
+var mutex = &sync.Mutex{}
+
 func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string) {
 
 	var mongoDatabase string
 
-	var rabbitHost string
-	var rabbitUser string
-	var rabbitPassword string
+
 
 	if mongoDatabase = os.Getenv("EVENTSTORE_MONGO_DATABASE"); mongoDatabase == "" {
 		mongoDatabase = "eventstore"
@@ -106,9 +111,10 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		rabbitPassword = "guest"
 	}
 
-	connection, err := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
+	var err error
+	connection, err = amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
 	defer connection.Close()
-	channel, err := connection.Channel()
+	channel, err = connection.Channel()
 
 	if err != nil {
 		panic(err.Error())
@@ -132,7 +138,7 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		var in64 = int64(i)
-		go exec(routingKey, prefix, aggregateID, aggregateType, after, modifier, mongoDatabase, "events_"+strconv.FormatInt(in64, 16), query, c, channel)
+		go exec(routingKey, prefix, aggregateID, aggregateType, after, modifier, mongoDatabase, "events_"+strconv.FormatInt(in64, 16), query, c)
 	}
 	wg.Wait()
 }
@@ -202,7 +208,8 @@ func normalizeArray(arr *bson.Array) *bson.Array {
 	return arr
 }
 
-func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo *mongo.Client, rabbit *amqp.Channel) {
+func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo *mongo.Client) {
+
 	cursor, _ := mongo.Database(database).Collection(collection).Find(context.Background(), query)
 	var counter = 0
 	for cursor.Next(context.Background()) {
@@ -249,9 +256,22 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 				typeQueue = "direct"
 			}
 
-			rabbit.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+			error := channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+			if error != nil {
 
-			fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
+				connection.Close()
+
+				mutex.Lock()
+				fmt.Println("Erro rabbitmq: "+error.Error())
+				connection, _ := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
+				channel, _ = connection.Channel()
+				mutex.Unlock()
+
+				channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+				fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
+			} else {
+				fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
+			}
 		}
 	}
 }
