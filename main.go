@@ -87,15 +87,10 @@ func main() {
 var rabbitHost string
 var rabbitUser string
 var rabbitPassword string
-var connection *amqp.Connection
-var channel *amqp.Channel
-var mutex = &sync.Mutex{}
 
 func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string) {
 
 	var mongoDatabase string
-
-
 
 	if mongoDatabase = os.Getenv("EVENTSTORE_MONGO_DATABASE"); mongoDatabase == "" {
 		mongoDatabase = "eventstore"
@@ -109,15 +104,6 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	}
 	if rabbitPassword = os.Getenv("EVENTSTORE_RABBIT_PASSWORD"); rabbitPassword == "" {
 		rabbitPassword = "guest"
-	}
-
-	var err error
-	connection, err = amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
-	defer connection.Close()
-	channel, err = connection.Channel()
-
-	if err != nil {
-		panic(err.Error())
 	}
 
 	var query = bson.NewDocument()
@@ -143,8 +129,8 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	wg.Wait()
 }
 
-func normalizeDocument(document *bson.Document) *bson.Document{
-	var tam =  document.Len()
+func normalizeDocument(document *bson.Document) *bson.Document {
+	var tam = document.Len()
 	for i := 0; i < tam; i++ {
 		el := document.ElementAt(uint(i))
 		newEl := normalizeValue(el.Value())
@@ -153,13 +139,13 @@ func normalizeDocument(document *bson.Document) *bson.Document{
 			switch newEl.Type() {
 			case bson.TypeString:
 				document.Set(bson.EC.String(el.Key(), newEl.StringValue()))
-			break
+				break
 			case bson.TypeEmbeddedDocument:
 				document.Set(bson.EC.SubDocument(el.Key(), newEl.MutableDocument()))
-			break
+				break
 			case bson.TypeArray:
 				document.Set(bson.EC.Array(el.Key(), newEl.MutableArray()))
-			break
+				break
 			}
 		}
 	}
@@ -183,7 +169,7 @@ func normalizeValue(el *bson.Value) *bson.Value {
 		normalized := normalizeArray(el.MutableArray())
 		return bson.EC.Array("", normalized).Value()
 	case bson.TypeDateTime:
-		var timestamp = time.Unix(el.DateTime() /1000, 0)
+		var timestamp = time.Unix(el.DateTime()/1000, 0)
 
 		return bson.EC.String("", timestamp.Format(time.RFC3339)).Value()
 	}
@@ -192,9 +178,9 @@ func normalizeValue(el *bson.Value) *bson.Value {
 }
 
 func normalizeArray(arr *bson.Array) *bson.Array {
-	var tam =  arr.Len()
+	var tam = arr.Len()
 	for i := 0; i < tam; i++ {
-		el,err := arr.Lookup(uint(i))
+		el, err := arr.Lookup(uint(i))
 
 		if err != nil {
 			panic(err)
@@ -209,6 +195,22 @@ func normalizeArray(arr *bson.Array) *bson.Array {
 }
 
 func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo *mongo.Client) {
+	var connection *amqp.Connection
+	var channel *amqp.Channel
+
+	var err error
+	connection, err = amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	defer connection.Close()
+	channel, err = connection.Channel()
+
+	if err != nil {
+		panic(err.Error())
+	}
 
 	cursor, _ := mongo.Database(database).Collection(collection).Find(context.Background(), query)
 	var counter = 0
@@ -224,11 +226,9 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 
 			d = normalizeDocument(d)
 
-
 			var evv interface{}
 
 			str := d.ToExtJSON((false))
-
 
 			errorUnmarshal := json.Unmarshal([]byte(str), &evv)
 			if errorUnmarshal != nil {
@@ -256,16 +256,25 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 				typeQueue = "direct"
 			}
 
-			error := channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
-			if error != nil {
+			arr := channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+			if arr != nil {
 
-				connection.Close()
+				for {
+					var err error
+					connection, err = amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
 
-				mutex.Lock()
-				fmt.Println("Erro rabbitmq: "+error.Error())
-				connection, _ := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
-				channel, _ = connection.Channel()
-				mutex.Unlock()
+					if err != nil {
+						fmt.Println("erro reconexao: "+err.Error())
+					} else {
+						break
+					}
+				}
+
+				channel, err = connection.Channel()
+
+				if err != nil {
+					panic(err.Error())
+				}
 
 				channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
 				fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
@@ -277,10 +286,10 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 }
 
 type EventMessage struct {
-	ID string      `json:"id"`
+	ID            string      `json:"id"`
 	AggregateType string      `json:"aggregateType"`
-	EventName string      `json:"eventName"`
-	EventData interface{} `json:"eventData"`
+	EventName     string      `json:"eventName"`
+	EventData     interface{} `json:"eventData"`
 }
 
 type Events struct {
