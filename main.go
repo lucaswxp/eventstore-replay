@@ -1,17 +1,17 @@
 package main
 
 import (
-	//"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/mongodb/mongo-go-driver/mongo"
 
-	"strings"
+	//"strings"
 
 	"context"
 	"time"
@@ -84,13 +84,18 @@ func main() {
 	}
 }
 
+var rabbitHost string
+var rabbitUser string
+var rabbitPassword string
+var connection *amqp.Connection
+var channel *amqp.Channel
+var mutex = &sync.Mutex{}
+
 func runApp(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string) {
 
 	var mongoDatabase string
 
-	var rabbitHost string
-	var rabbitUser string
-	var rabbitPassword string
+
 
 	if mongoDatabase = os.Getenv("EVENTSTORE_MONGO_DATABASE"); mongoDatabase == "" {
 		mongoDatabase = "eventstore"
@@ -106,9 +111,10 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 		rabbitPassword = "guest"
 	}
 
-	connection, err := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
+	var err error
+	connection, err = amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
 	defer connection.Close()
-	channel, err := connection.Channel()
+	channel, err = connection.Channel()
 
 	if err != nil {
 		panic(err.Error())
@@ -132,38 +138,110 @@ func runApp(routingKey string, prefix string, aggregateID string, aggregateType 
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		var in64 = int64(i)
-		go exec(routingKey, prefix, aggregateID, aggregateType, after, modifier, mongoDatabase, "events_"+strconv.FormatInt(in64, 16), query, c, channel)
+		go exec(routingKey, prefix, aggregateID, aggregateType, after, modifier, mongoDatabase, "events_"+strconv.FormatInt(in64, 16), query, c)
 	}
 	wg.Wait()
 }
 
-func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo *mongo.Client, rabbit *amqp.Channel) {
+func normalizeDocument(document *bson.Document) *bson.Document{
+	var tam =  document.Len()
+	for i := 0; i < tam; i++ {
+		el := document.ElementAt(uint(i))
+		newEl := normalizeValue(el.Value())
+		if newEl != nil {
+
+			switch newEl.Type() {
+			case bson.TypeString:
+				document.Set(bson.EC.String(el.Key(), newEl.StringValue()))
+			break
+			case bson.TypeEmbeddedDocument:
+				document.Set(bson.EC.SubDocument(el.Key(), newEl.MutableDocument()))
+			break
+			case bson.TypeArray:
+				document.Set(bson.EC.Array(el.Key(), newEl.MutableArray()))
+			break
+			}
+		}
+	}
+
+	return document
+}
+
+func normalizeValue(el *bson.Value) *bson.Value {
+	switch el.Type() {
+	case bson.TypeString:
+		var title = el.StringValue()
+		title = strings.Replace(title, "\n", "\\n", -1)
+		title = strings.Replace(title, "\"", "\\\"", -1)
+		title = strings.Replace(title, "\t", "\\t", -1)
+
+		return bson.EC.String("", title).Value()
+	case bson.TypeEmbeddedDocument:
+		normalized := normalizeDocument(el.MutableDocument())
+		return bson.EC.SubDocument("", normalized).Value()
+	case bson.TypeArray:
+		normalized := normalizeArray(el.MutableArray())
+		return bson.EC.Array("", normalized).Value()
+	case bson.TypeDateTime:
+		var timestamp = time.Unix(el.DateTime() /1000, 0)
+
+		return bson.EC.String("", timestamp.Format(time.RFC3339)).Value()
+	}
+
+	return nil
+}
+
+func normalizeArray(arr *bson.Array) *bson.Array {
+	var tam =  arr.Len()
+	for i := 0; i < tam; i++ {
+		el,err := arr.Lookup(uint(i))
+
+		if err != nil {
+			panic(err)
+		}
+
+		newVal := normalizeValue(el)
+		if newVal != nil {
+			arr.Set(uint(i), newVal)
+		}
+	}
+	return arr
+}
+
+func exec(routingKey string, prefix string, aggregateID string, aggregateType string, after string, modifier string, database string, collection string, query *bson.Document, mongo *mongo.Client) {
+
 	cursor, _ := mongo.Database(database).Collection(collection).Find(context.Background(), query)
-	var items []Events
+	var counter = 0
 	for cursor.Next(context.Background()) {
 		item := Events{}
 		cursor.Decode(&item)
-		items = append(items, item)
-	}
-	var counter = 0
-	for _, obj := range items {
-		var events = obj.Events
+
+		var events = item.Events
 		for _, event := range events {
 			counter++
 
 			d := event.Data.(*bson.Document)
 
+			d = normalizeDocument(d)
+
+
 			var evv interface{}
 
 			str := d.ToExtJSON((false))
-			str = strings.Replace(str, "\n", "\\n", -1)
-			str = strings.Replace(str, "\t", "\\t", -1)
 
-			json.Unmarshal([]byte(str), &evv)
 
-			ev := EventMessage{EventName: string(event.Fqn), EventData: evv}
+			errorUnmarshal := json.Unmarshal([]byte(str), &evv)
+			if errorUnmarshal != nil {
+				fmt.Printf("Error unmarshal: %s\n", errorUnmarshal)
+				fmt.Printf("JSON bugado: %s\n", str)
+			}
 
-			b, _ := json.Marshal(ev)
+			ev := EventMessage{ID: event.EventId, AggregateType: event.AggregateType, EventName: string(event.Fqn), EventData: evv}
+
+			b, errorMarshal := json.Marshal(ev)
+			if errorMarshal != nil {
+				fmt.Printf("Error marshal: %s\n", errorMarshal)
+			}
 
 			data := amqp.Publishing{Body: b}
 			id := string(event.AggregateId)
@@ -178,14 +256,29 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 				typeQueue = "direct"
 			}
 
-			rabbit.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+			error := channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+			if error != nil {
 
-			fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
+				connection.Close()
+
+				mutex.Lock()
+				fmt.Println("Erro rabbitmq: "+error.Error())
+				connection, _ := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
+				channel, _ = connection.Channel()
+				mutex.Unlock()
+
+				channel.Publish(prefix+"-"+string(event.AggregateType)+"-"+bucket+"-"+typeQueue, routingKey, false, false, data)
+				fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
+			} else {
+				fmt.Println("["+strconv.Itoa(counter)+"-"+bucket+"]", "sending", string(event.AggregateId))
+			}
 		}
 	}
 }
 
 type EventMessage struct {
+	ID string      `json:"id"`
+	AggregateType string      `json:"aggregateType"`
 	EventName string      `json:"eventName"`
 	EventData interface{} `json:"eventData"`
 }
