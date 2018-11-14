@@ -263,7 +263,7 @@ func exec(routingKey string, prefix string, aggregateID string, aggregateType st
 
 				mutex.Lock()
 				fmt.Println("Erro rabbitmq: "+error.Error())
-				connection, _ := amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
+				connection, _ = amqp.Dial("amqp://" + rabbitUser + ":" + rabbitPassword + "@" + rabbitHost + ":5672/")
 				channel, _ = connection.Channel()
 				mutex.Unlock()
 
